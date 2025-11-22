@@ -1,6 +1,5 @@
 # musicbot.py - Telegram VC Music Bot for Google Cloud Shell
 # Works with Pyrogram + pytgcalls (latest 2025)
-
 import os
 import asyncio
 from pyrogram import Client, filters, idle
