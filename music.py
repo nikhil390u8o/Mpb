@@ -1,21 +1,19 @@
-# musicbot.py - Telegram VC Music Bot for Google Cloud Shell
-# Works with Pyrogram + pytgcalls (latest 2025)
+# musicbot.py - Telegram VC Music Bot (PyTgCalls v2 compatible)
 
 import os
 import asyncio
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pytgcalls import PyTgCalls
-from pytgcalls.types.stream import Stream
-from pytgcalls.types.stream import AudioParameters
+from pytgcalls.types.input_stream import InputAudioStream
+from pytgcalls.types.input_stream.quality import HighQualityAudio
 from youtube_search import YoutubeSearch
 import yt_dlp as youtube_dl
 
 # ================= CONFIG =================
-API_ID = "20898349"          # Change this
-API_HASH = "9fdb830d1e435b785f536247f49e7d87"      # Change this
-BOT_TOKEN = "7850782505:AAFVrhfJHMU1arp0CHTrpDdez70B0mZwHIc"    # Change this
-SESSION_NAME = "musicbot_session"
+API_ID = "20898349"           # Change this
+API_HASH = "9fdb830d1e435b785f536247f49e7d87"  # Change this
+BOT_TOKEN = "7850782505:AAFVrhfJHMU1arp0CHTrpDdez70B0mZwHIc" # Change this
 
 app = Client("musicbot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 call = PyTgCalls(app)
@@ -45,14 +43,14 @@ ytdl_opts = {
 @app.on_message(filters.command("start"))
 async def start(client, message: Message):
     await message.reply_text(
-        "🎵 **Telegram VC Music Player Bot**\n\n"
+        "🎵 Telegram VC Music Player Bot\n\n"
         "Commands:\n"
         "/play <song name or youtube link> - Play music\n"
         "/pause - Pause stream\n"
         "/resume - Resume stream\n"
         "/skip - Skip current song\n"
         "/queue - Show queue\n"
-        "/join - Prepare bot (optional)\n"
+        "/join - Prepare bot\n"
         "/leave - Leave voice chat\n\n"
         "Made with ❤️ for Google Cloud Shell",
         reply_markup=InlineKeyboardMarkup([
@@ -62,14 +60,8 @@ async def start(client, message: Message):
 
 @app.on_message(filters.command("join"))
 async def join_vc(client, message: Message):
-    chat_id = message.chat.id
-    try:
-        await call.start()
-        # We don't join with a dummy stream here to avoid missing files.
-        # Bot will join automatically when /play is used.
-        await message.reply("✅ Ready. Use /play <song> to start streaming (bot will join the VC automatically).")
-    except Exception as e:
-        await message.reply(f"Error: {e}")
+    await call.start()
+    await message.reply("✅ Bot is ready. Use /play <song> to start streaming.")
 
 @app.on_message(filters.command("leave"))
 async def leave_vc(client, message: Message):
@@ -82,7 +74,7 @@ async def leave_vc(client, message: Message):
         playing_chat_id = None
         await message.reply("✅ Left voice chat and cleared queue.")
     except Exception as e:
-        await message.reply(f"Not in voice chat or error: {e}")
+        await message.reply(f"Error: {e}")
 
 @app.on_message(filters.command("play") & filters.group)
 async def play_music(client, message: Message):
@@ -116,7 +108,6 @@ async def play_music(client, message: Message):
     except Exception as e:
         return await msg.edit(f"Download failed: {str(e)}")
 
-    # Add to queue
     queue.append({"title": title, "file": file_path, "duration": duration, "requested_by": message.from_user.first_name, "chat_id": chat_id})
 
     if len(queue) == 1 and (current_song is None):
@@ -132,12 +123,6 @@ async def stream(chat_id, file_path):
     playing_chat_id = chat_id
 
     try:
-        stream = Stream(
-            file_path,
-            audio_parameters=AudioParameters(),
-        )
-
-        # Check if bot already joined
         in_call = False
         try:
             call_info = await call.get_call(chat_id)
@@ -146,9 +131,9 @@ async def stream(chat_id, file_path):
             in_call = False
 
         if not in_call:
-            await call.join_group_call(chat_id, stream)
+            await call.join_group_call(chat_id, InputAudioStream(file_path, HighQualityAudio()))
         else:
-            await call.change_stream(chat_id, stream)
+            await call.change_stream(chat_id, InputAudioStream(file_path, HighQualityAudio()))
 
     except Exception as e:
         print(f"Stream error: {e}")
@@ -157,21 +142,18 @@ async def stream(chat_id, file_path):
                 os.remove(file_path)
             except:
                 pass
-
         if queue:
             queue.pop(0)
-
         if queue:
             next_song = queue[0]
             await stream(chat_id, next_song["file"])
         else:
             current_song = None
             playing_chat_id = None
-# Auto skip when song ends
+
 @call.on_stream_end()
 async def on_stream_end(update):
     global queue, current_song, playing_chat_id
-    # remove finished song (first in queue)
     if queue:
         queue.pop(0)
     if queue:
@@ -186,17 +168,15 @@ async def skip(client, message: Message):
     global queue, current_song, playing_chat_id
     chat_id = message.chat.id
     if queue:
-        # remove current
         queue.pop(0)
         await message.reply("⏩ Skipped!")
         if queue:
             next_song = queue[0]
             await stream(next_song["chat_id"], next_song["file"])
         else:
-            # stop stream by leaving call
             try:
                 await call.leave_group_call(chat_id)
-            except Exception:
+            except:
                 pass
             current_song = None
             playing_chat_id = None
