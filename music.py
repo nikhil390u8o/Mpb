@@ -132,37 +132,41 @@ async def stream(chat_id, file_path):
     playing_chat_id = chat_id
 
     try:
-        # If bot is not yet in the voice chat, join with this file.
+        stream = Stream(
+            file_path,
+            audio_parameters=AudioParameters(),
+        )
+
+        # Check if bot already joined
         in_call = False
         try:
             call_info = await call.get_call(chat_id)
             in_call = bool(call_info)
-        except Exception:
+        except:
             in_call = False
 
         if not in_call:
-            await call.join_group_call(chat_id, AudioPiped(file_path))
+            await call.join_group_call(chat_id, stream)
         else:
-            await call.change_stream(chat_id, AudioPiped(file_path))
+            await call.change_stream(chat_id, stream)
 
     except Exception as e:
         print(f"Stream error: {e}")
-        # cleanup failed file and advance queue
         if os.path.exists(file_path):
             try:
                 os.remove(file_path)
-            except Exception:
+            except:
                 pass
+
         if queue:
             queue.pop(0)
-        # attempt next
+
         if queue:
             next_song = queue[0]
             await stream(chat_id, next_song["file"])
         else:
             current_song = None
             playing_chat_id = None
-
 # Auto skip when song ends
 @call.on_stream_end()
 async def on_stream_end(update):
