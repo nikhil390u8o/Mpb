@@ -6,7 +6,8 @@ import asyncio
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pytgcalls import PyTgCalls
-from pytgcalls.types import AudioPiped
+from pytgcalls.types.stream import Stream
+from pytgcalls.types.stream import AudioParameters
 from youtube_search import YoutubeSearch
 import yt_dlp as youtube_dl
 
