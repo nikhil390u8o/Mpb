@@ -1,5 +1,6 @@
 # musicbot.py - Telegram VC Music Bot for Google Cloud Shell
 # Works with Pyrogram + pytgcalls (latest 2025)
+
 import os
 import asyncio
 from pyrogram import Client, filters, idle
@@ -15,16 +16,12 @@ API_HASH = "9fdb830d1e435b785f536247f49e7d87"      # Change this
 BOT_TOKEN = "7850782505:AAFVrhfJHMU1arp0CHTrpDdez70B0mZwHIc"    # Change this
 SESSION_NAME = "musicbot_session"
 
-# Replace with your values
-# API_ID = 1234567
-# API_HASH = "abcd1234efgh5678ijkl9012mnop3456"
-# BOT_TOKEN = "7123456789:AAFxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-
 app = Client("musicbot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 call = PyTgCalls(app)
 
 queue = []
 current_song = None
+playing_chat_id = None
 
 # ================= YTDL OPTIONS =================
 ytdl_opts = {
@@ -54,7 +51,7 @@ async def start(client, message: Message):
         "/resume - Resume stream\n"
         "/skip - Skip current song\n"
         "/queue - Show queue\n"
-        "/join - Join voice chat\n"
+        "/join - Prepare bot (optional)\n"
         "/leave - Leave voice chat\n\n"
         "Made with ❤️ for Google Cloud Shell",
         reply_markup=InlineKeyboardMarkup([
@@ -65,28 +62,30 @@ async def start(client, message: Message):
 @app.on_message(filters.command("join"))
 async def join_vc(client, message: Message):
     chat_id = message.chat.id
-    if await call.get_call(chat_id):
-        return await message.reply("Already in voice chat!")
-    
     try:
         await call.start()
-        await call.join_group_call(chat_id, InputAudioStream("http://ngchn.audio:8000/stream"))  # silence until play
-        await message.reply("✅ Joined voice chat!")
+        # We don't join with a dummy stream here to avoid missing files.
+        # Bot will join automatically when /play is used.
+        await message.reply("✅ Ready. Use /play <song> to start streaming (bot will join the VC automatically).")
     except Exception as e:
         await message.reply(f"Error: {e}")
 
 @app.on_message(filters.command("leave"))
 async def leave_vc(client, message: Message):
+    global queue, current_song, playing_chat_id
     chat_id = message.chat.id
     try:
         await call.leave_group_call(chat_id)
         queue.clear()
+        current_song = None
+        playing_chat_id = None
         await message.reply("✅ Left voice chat and cleared queue.")
-    except:
-        await message.reply("Not in voice chat.")
+    except Exception as e:
+        await message.reply(f"Not in voice chat or error: {e}")
 
 @app.on_message(filters.command("play") & filters.group)
 async def play_music(client, message: Message):
+    global queue, current_song, playing_chat_id
     chat_id = message.chat.id
     if len(message.command) == 1:
         return await message.reply("Usage: /play <song name or YouTube link>")
@@ -97,6 +96,7 @@ async def play_music(client, message: Message):
     # Search or direct link
     if "youtube.com" in query or "youtu.be" in query:
         url = query
+        title = None
     else:
         results = YoutubeSearch(query, max_results=1).to_dict()
         if not results:
@@ -104,83 +104,117 @@ async def play_music(client, message: Message):
         url = f"https://youtube.com{results[0]['url_suffix']}"
         title = results[0]['title']
 
-    await msg.edit(f"📥 Downloading: {title if 'title' in locals() else 'Song'}...")
+    await msg.edit(f"📥 Downloading: {title if title else 'Song'}...")
 
     try:
         ydl = youtube_dl.YoutubeDL(ytdl_opts)
         info = ydl.extract_info(url, download=True)
-        title = info.get('title', 'Unknown')
+        title = info.get('title', title or 'Unknown')
         duration = info.get('duration', 0)
         file_path = f"downloads/{info['id']}.mp3"
     except Exception as e:
         return await msg.edit(f"Download failed: {str(e)}")
 
     # Add to queue
-    queue.append({"title": title, "file": file_path, "duration": duration, "requested_by": message.from_user.first_name})
+    queue.append({"title": title, "file": file_path, "duration": duration, "requested_by": message.from_user.first_name, "chat_id": chat_id})
 
-    if len(queue) == 1:
+    if len(queue) == 1 and (current_song is None):
         await msg.edit(f"▶️ Now Playing: **{title}**")
+        playing_chat_id = chat_id
         await stream(chat_id, file_path)
     else:
         await msg.edit(f"Added to queue: **{title}** [{len(queue)-1} in queue]")
 
 async def stream(chat_id, file_path):
-    global current_song
+    global current_song, queue, playing_chat_id
     current_song = file_path
+    playing_chat_id = chat_id
 
     try:
-        await call.change_stream(
-            chat_id,
-            InputAudioStream(
-                file_path,
-                HighQualityAudio()
-            )
-        )
+        # If bot is not yet in the voice chat, join with this file.
+        in_call = False
+        try:
+            call_info = await call.get_call(chat_id)
+            in_call = bool(call_info)
+        except Exception:
+            in_call = False
+
+        if not in_call:
+            await call.join_group_call(chat_id, AudioPiped(file_path))
+        else:
+            await call.change_stream(chat_id, AudioPiped(file_path))
+
     except Exception as e:
         print(f"Stream error: {e}")
+        # cleanup failed file and advance queue
         if os.path.exists(file_path):
-            os.remove(file_path)
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
         if queue:
             queue.pop(0)
+        # attempt next
         if queue:
             next_song = queue[0]
             await stream(chat_id, next_song["file"])
+        else:
+            current_song = None
+            playing_chat_id = None
 
 # Auto skip when song ends
 @call.on_stream_end()
-async def on_stream_end(client, update):
+async def on_stream_end(update):
+    global queue, current_song, playing_chat_id
+    # remove finished song (first in queue)
     if queue:
         queue.pop(0)
     if queue:
         next_song = queue[0]
-        await stream(update.chat_id, next_song["file"])
+        await stream(next_song["chat_id"], next_song["file"])
     else:
-        global current_song
         current_song = None
+        playing_chat_id = None
 
 @app.on_message(filters.command("skip"))
 async def skip(client, message: Message):
+    global queue, current_song, playing_chat_id
     chat_id = message.chat.id
     if queue:
+        # remove current
         queue.pop(0)
         await message.reply("⏩ Skipped!")
         if queue:
             next_song = queue[0]
-            await stream(chat_id, next_song["file"])
+            await stream(next_song["chat_id"], next_song["file"])
+        else:
+            # stop stream by leaving call
+            try:
+                await call.leave_group_call(chat_id)
+            except Exception:
+                pass
+            current_song = None
+            playing_chat_id = None
     else:
         await message.reply("Queue is empty!")
 
 @app.on_message(filters.command("pause"))
 async def pause(client, message: Message):
     chat_id = message.chat.id
-    await call.pause_stream(chat_id)
-    await message.reply("⏸ Paused")
+    try:
+        await call.pause_stream(chat_id)
+        await message.reply("⏸ Paused")
+    except Exception as e:
+        await message.reply(f"Unable to pause: {e}")
 
 @app.on_message(filters.command("resume"))
 async def resume(client, message: Message):
     chat_id = message.chat.id
-    await call.resume_stream(chat_id)
-    await message.reply("▶️ Resumed")
+    try:
+        await call.resume_stream(chat_id)
+        await message.reply("▶️ Resumed")
+    except Exception as e:
+        await message.reply(f"Unable to resume: {e}")
 
 @app.on_message(filters.command("queue"))
 async def show_queue(client, message: Message):
